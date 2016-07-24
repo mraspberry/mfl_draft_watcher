@@ -7,10 +7,12 @@ import logging
 import logging.handlers
 import operator
 import os
-import pprint
 import requests
+import pprint
 import sys
 from datetime import date,datetime,timedelta
+
+import mfl
 
 _HOME = os.path.expanduser('~')
 _RUNDIR = os.path.join(_HOME,'.local')
@@ -21,7 +23,8 @@ _PLAYERS = os.path.join(_CACHEDIR,'players.json')
 _FRANCHISES = os.path.join(_CACHEDIR,'franchises.json')
 _DRAFTRES = os.path.join(_CACHEDIR,'draftResults.json')
 _FULL_LEAGUE = os.path.join(_CACHEDIR,'leagueinfo.json')
-_MFL_ENDPOINT = 'http://football.myfantasyleague.com/{}/export'.format(date.today().year)
+_LEAGUEID = 78833
+_MFL = mfl.API(_LEAGUEID)
 
 def make_dirs(dirname):
     try:
@@ -30,12 +33,8 @@ def make_dirs(dirname):
         pass
 
 def fetch_players():
-    params = {
-        'JSON': 1,
-        'TYPE': 'players'
-    }
     # players ends up being a list of dicts
-    players = requests.get(_MFL_ENDPOINT,params=params).json()['players']['player']
+    players = _MFL.player()['players']['player']
     by_id = index_by_id(players)
     return by_id
 
@@ -77,19 +76,13 @@ def cache_league_res(results):
     with open(_FULL_LEAGUE,'w',encoding='utf8') as league_fh:
         json.dump(results,league_fh)
 
-def fetch_teams(leagueid):
-    params = {
-        'JSON': 1,
-        'TYPE': 'league',
-        'L': leagueid,
-    }
-    results = requests.get(_MFL_ENDPOINT,params=params)
-    json_res = results.json()
+def fetch_teams():
+    json_res = _MFL.league()
     cache_league_res(json_res)
     franchises = json_res['league']['franchises']['franchise']
     return index_by_id(franchises)
 
-def get_teams(leagueid):
+def get_teams():
     if old(_FRANCHISES):
         logging.debug('Updating franchise cache')
         teams = fetch_teams(leagueid)
@@ -101,7 +94,7 @@ def get_teams(leagueid):
     return teams
 
 def post_to_gm(msg):
-    data = {'bot_id': 'd3a8cb1e03fd53f5ac66116208','text': msg}
+    data = {'bot_id': 'a60d3a68724bf4eae9c0d0e949','text': msg}
     gm_url = 'https://api.groupme.com/v3/bots/post'
     result = requests.post(gm_url,data=data)
     logging.debug('Result of GM post: %i',result.status_code)
@@ -121,21 +114,15 @@ def get_league_name():
 
     return results['league']['name']
 
-def get_draft_info(leagueid):
-    params = {
-        'TYPE': 'draftResults',
-        'JSON': 1,
-        'L': leagueid,
-    }
+def get_draft_info():
     try:
         prev_info = load_prev_draft_info()
     except IOError:
         prev_info = collections.OrderedDict()
 
-    results = requests.get(_MFL_ENDPOINT,params=params)
     new_info = collections.OrderedDict()
     getter = operator.itemgetter('franchise','round','pick','player')
-    picks = results.json()['draftResults']['draftUnit']['draftPick']
+    picks = _MFL.draftResults()['draftResults']['draftUnit']['draftPick']
 
     # if x['timestamp'] is an empty string the pick hasn't been made yet
     for pick in filter(lambda x: x['timestamp'],picks):
@@ -155,10 +142,9 @@ def main():
     make_dirs(_RUNDIR)
     make_dirs(_CACHEDIR)
     make_dirs(_LOGDIR)
-    leagueid = 52269
     logger = logging.getLogger(None)
     handle = logging.handlers.TimedRotatingFileHandler(_LOG,when='midnight',backupCount=7)
-    formatter = logging.Formatter('%(asctime)s|%(levelname)8s|%(message)s')
+    formatter = logging.Formatter('{asctime}|{levelname:<8}|{name:<40}|{message}',style='{')
     handle.formatter = formatter
     logger.addHandler(handle)
     logger.setLevel(logging.DEBUG)
@@ -166,9 +152,9 @@ def main():
     try:
         players = get_players()
         logging.info('Getting teams')
-        teams = get_teams(leagueid)
+        teams = get_teams()
         leaguename = get_league_name()
-        draft_info = get_draft_info(leagueid)
+        draft_info = get_draft_info()
         if not draft_info:
             logging.info('No new picks made. Exiting')
             # return here so we do the lock cleanup
