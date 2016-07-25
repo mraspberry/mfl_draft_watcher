@@ -154,9 +154,11 @@ def check_draft(leagueid, playercache, leaguecache, teamcache, draftcache, botid
     if msglist:
         msg = '\n'.join(msglist)
         post_to_gm(msg,botid)
-    logging.info('Saving new draft picks in %s',draftcache)
-    with open(draftcache,'w',encoding='utf8') as draft_fh:
-        json.dump(full_draft,draft_fh)
+        logging.info('Saving new draft picks in %s',draftcache)
+        with open(draftcache,'w',encoding='utf8') as draft_fh:
+            json.dump(full_draft,draft_fh)
+    else:
+        logging.info('No new picks made')
 
 def filepath_getter(basefunc,value):
     return os.path.expandvars(basefunc(value))
