@@ -1,40 +1,36 @@
 #!/usr/bin/env python3
 
 import collections
+import configparser
 import fasteners
+import functools
 import json
 import logging
 import logging.handlers
+import mfl
 import operator
 import os
-import requests
 import pprint
+import requests
 import sys
+import tempfile
+from argparse import ArgumentParser
 from datetime import date,datetime,timedelta
 
-import mfl
+_MFL = mfl.API()
+_LOCKFILE = os.path.join(tempfile.gettempdir(),'.mfl_draft_watcher')
 
-_HOME = os.path.expanduser('~')
-_RUNDIR = os.path.join(_HOME,'.local')
-_CACHEDIR = os.path.join(_RUNDIR,'var','db','mfl_draft_watcher')
-_LOGDIR = os.path.join(_RUNDIR,'var','log')
-_LOG = os.path.join(_LOGDIR,'draft_watcher.log')
-_PLAYERS = os.path.join(_CACHEDIR,'players.json')
-_FRANCHISES = os.path.join(_CACHEDIR,'franchises.json')
-_DRAFTRES = os.path.join(_CACHEDIR,'draftResults.json')
-_FULL_LEAGUE = os.path.join(_CACHEDIR,'leagueinfo.json')
-_LEAGUEID = 78833
-_MFL = mfl.API(_LEAGUEID)
-
-def make_dirs(dirname):
-    try:
-        os.makedirs(dirname)
-    except OSError:
-        pass
+def make_file_directory(*args):
+    for filename in args:
+        dirname = os.path.dirname(filename)
+        try:
+            os.makedirs(dirname)
+        except OSError:
+            pass
 
 def fetch_players():
     # players ends up being a list of dicts
-    players = _MFL.player()['players']['player']
+    players = _MFL.players()['players']['player']
     by_id = index_by_id(players)
     return by_id
 
@@ -45,6 +41,36 @@ def index_by_id(listobj):
         results[id] = item
     return results
 
+def get_or_fetch(cachefile, fetch_func, func_args):
+    if old(cachefile):
+        logging.debug('Fetching new data for %s',cachefile)
+        results = fetch_func(*func_args)
+        with open(cachefile,'w',encoding='utf8') as cache:
+            json.dump(results,cache)
+    else:
+        with open(cachefile,encoding='utf8') as cache:
+            results = json.load(cache)
+
+    return results
+
+def cache_league_res(results,leaguecache):
+    logging.debug('Caching full league results to %s',leaguecache)
+    with open(leaguecache,'w',encoding='utf8') as league_fh:
+        json.dump(results,league_fh)
+
+def fetch_teams(leaguecache):
+    json_res = _MFL.league()
+    cache_league_res(json_res,leaguecache)
+    franchises = json_res['league']['franchises']['franchise']
+    return index_by_id(franchises)
+
+def post_to_gm(msg,botid):
+    data = {'bot_id': botid, 'text': msg}
+    gm_url = 'https://api.groupme.com/v3/bots/post'
+    result = requests.post(gm_url,data=data)
+    result.raise_for_status()
+    logging.debug('Result of GM post: %i',result.status_code)
+
 def old(filename):
    logging.debug('Checking age of %s',filename)
    try:
@@ -52,71 +78,22 @@ def old(filename):
    except OSError:
         logging.debug('%s not there. Making it old',filename)
         mtime = datetime.min # make it really old
-    
+
    now = datetime.now()
    thres = timedelta(hours=24)
    diff = now - mtime
    logging.debug("Diff is %s",diff)
    return diff > thres
 
-def get_players():
-    if old(_PLAYERS):
-        logging.info('Updating player cache')
-        players = fetch_players()
-        with open(_PLAYERS,'w') as player_fh:
-            json.dump(players,player_fh)
-    else:
-        with open(_PLAYERS,'r') as player_fh:
-            players = json.load(player_fh)
-    
-    return players
+def load_prev_draft_info(filename):
+    logging.info('Loading previous draft picks from %s',filename)
+    with open(filename,'r',encoding='utf8') as draft_fh:
+        info = json.load(draft_fh)
+    return info
 
-def cache_league_res(results):
-    logging.debug('Caching full league results')
-    with open(_FULL_LEAGUE,'w',encoding='utf8') as league_fh:
-        json.dump(results,league_fh)
-
-def fetch_teams():
-    json_res = _MFL.league()
-    cache_league_res(json_res)
-    franchises = json_res['league']['franchises']['franchise']
-    return index_by_id(franchises)
-
-def get_teams():
-    if old(_FRANCHISES):
-        logging.debug('Updating franchise cache')
-        teams = fetch_teams(leagueid)
-        with open(_FRANCHISES,'w',encoding='utf8') as franchise_fh:
-            json.dump(teams,franchise_fh)
-    else:
-        with open(_FRANCHISES,'r',encoding='utf8') as franchise_fh:
-            teams = json.load(franchise_fh)
-    return teams
-
-def post_to_gm(msg):
-    data = {'bot_id': 'a60d3a68724bf4eae9c0d0e949','text': msg}
-    gm_url = 'https://api.groupme.com/v3/bots/post'
-    result = requests.post(gm_url,data=data)
-    logging.debug('Result of GM post: %i',result.status_code)
-
-def load_prev_draft_info():
-    with open(_DRAFTRES,'r',encoding='utf8') as draft_fh:
-        draft_info = json.load(draft_fh)
-    return draft_info
-
-def write_draft_info(info):
-    with open(_DRAFTRES,'w',encoding='utf8') as draft_fh:
-        json.dump(info,draft_fh)
-
-def get_league_name():
-    with open(_FULL_LEAGUE,encoding='utf8') as league_fh:
-        results = json.load(league_fh)
-
-    return results['league']['name']
-
-def get_draft_info():
+def get_draft_info(draftcache):
     try:
-        prev_info = load_prev_draft_info()
+        prev_info = load_prev_draft_info(draftcache)
     except IOError:
         prev_info = collections.OrderedDict()
 
@@ -129,74 +106,88 @@ def get_draft_info():
         prevkey = '_'.join(getter(pick))
         if not prevkey in prev_info:
             logging.debug('%s not a key in prev_info',prevkey)
-            new_info[prevkey] = [pick]
+            logging.debug(pprint.pformat(pick))
+            new_info[prevkey] = pick
 
     # add in our new data
     prev_info.update(new_info)
-    write_draft_info(prev_info)
 
-    return new_info
+    return (prev_info,new_info)
 
-@fasteners.interprocess_locked('/tmp/.mfl_draft_watcher.lock')
-def main():
-    make_dirs(_RUNDIR)
-    make_dirs(_CACHEDIR)
-    make_dirs(_LOGDIR)
-    logger = logging.getLogger(None)
-    handle = logging.handlers.TimedRotatingFileHandler(_LOG,when='midnight',backupCount=7)
+def setup_logger(logfile,loglevel):
+    logger = logging.getLogger()
+    logger.setLevel(loglevel)
+    make_file_directory(logfile)
+    handler = logging.handlers.TimedRotatingFileHandler(logfile,when='midnight',backupCount=14)
     formatter = logging.Formatter('{asctime}|{levelname:<8}|{name:<40}|{message}',style='{')
-    handle.formatter = formatter
-    logger.addHandler(handle)
-    logger.setLevel(logging.DEBUG)
-    logging.info('Getting players')
-    try:
-        players = get_players()
-        logging.info('Getting teams')
-        teams = get_teams()
-        leaguename = get_league_name()
-        draft_info = get_draft_info()
-        if not draft_info:
-            logging.info('No new picks made. Exiting')
-            # return here so we do the lock cleanup
-            return
-        msglist = list()
-        ##template = 'With the number {num} pick in the {ln} draft, {team} selects {player} {pos}'
-        template = '{num}: {player}, {pos}, {team}'
-        for draftkey,draftval in draft_info.items():
-            # calculate actual pick number instead of round <num> pick <num>
-            draftval = draftval[0]
-            ##roundbase = 12 * (int(draftval['round']) - 1)
-            ##picknum = roundbase + int(draftval['pick'])
-            roundbase = int(draftval['round'])
-            pick = draftval['pick']
-            picknum = '{}.{}'.format(roundbase,pick)
-            logging.debug(pprint.pformat(draftval))
-            try:
-                playerinfo = players[draftval['player']]
-            except KeyError:
-                playerinfo = { 'name': 'Devy Draft Pick', 'position': 'N/A' }
-            name = playerinfo['name']
-            teaminfo = teams[draftval['franchise']]
-            team = teaminfo['name']
-            position = playerinfo['position']
-            msg = template.format(
-                ##ln=leaguename,
-                num=picknum,
-                player=name,
-                pos=position,
-                team=team,
-            )
-            msglist.append(msg)
-            logging.debug('Added "%s" to msglist',msg)
-    except Exception:
-        logging.exception('Caught unhandled exception')
-        raise
+    handler.formatter = formatter
+    logger.addHandler(handler)
+    return logger
 
+def check_draft(leagueid, playercache, leaguecache, teamcache, draftcache, botid):
+    _MFL.leagueid = leagueid
+    make_file_directory(playercache,leaguecache,teamcache,draftcache)
+    teams = get_or_fetch(teamcache,fetch_teams,[leaguecache])
+    players = get_or_fetch(playercache,fetch_players,list())
+    (full_draft,new_picks) = get_draft_info(draftcache)
+    msglist = list()
+    template = "{rnd}.{pick}: {player}, {pos}, {team}"
+    for pickinfo in new_picks:
+        (franchiseid, roundnum, picknum, playerid) = pickinfo.split('_')
+        playerinfo = players[playerid]
+        teaminfo = teams[franchiseid]
+        msgline = template.format(
+            rnd=roundnum,
+            pick=picknum,
+            player=playerinfo['name'],
+            pos=playerinfo['position'],
+            team=teaminfo['name'],
+            )
+        msglist.append(msgline)
+        logging.debug("Added '%s' to msglist",msgline)
     if msglist:
-        message = '\n'.join(msglist)
-        logging.debug('GM Message: "%s"',repr(message))
-        post_to_gm(message)
+        msg = '\n'.join(msglist)
+        post_to_gm(msg,botid)
+    logging.info('Saving new draft picks in %s',draftcache)
+    with open(draftcache,'w',encoding='utf8') as draft_fh:
+        json.dump(full_draft,draft_fh)
+
+def filepath_getter(basefunc,value):
+    return os.path.expandvars(basefunc(value))
+
+@fasteners.interprocess_locked(_LOCKFILE)
+def main():
+    desc = 'Watches for draft picks to be made in MFL leagues and posts to GroupMe when they are'
+    parser = ArgumentParser(description=desc)
+    parser.add_argument('configfile',help="Configuration file containing league and GroupMe information")
+    args = parser.parse_args()
+    config = configparser.ConfigParser()
+    main_sect = 'draft_watcher'
+    with open(args.configfile) as cf:
+        config.readfp(cf)
+    logfile = os.path.expandvars(config.get(main_sect,'logfile'))
+    loglevel = getattr(logging,config.get(main_sect,'loglevel'),logging.DEBUG)
+    logger = setup_logger(logfile,loglevel)
+    logger.info('Starting up with PID %i',os.getpid())
+    for sect in filter(lambda x:x != main_sect,config.sections()):
+        base_getter = functools.partial(config.get,sect)
+        fgetter = functools.partial(filepath_getter,base_getter)
+        try:
+            leagueid = config.getint(sect,'leagueid')
+            playercache = fgetter('player_cache')
+            leaguecache = fgetter('leagueinfo_cache')
+            teamcache = fgetter('franchise_cache')
+            draftcache = fgetter('draft_cache')
+            botid = config.get(sect,'botid')
+        except configparser.Error:
+            logging.exception('Missing configuration values')
+            continue
+        try:
+            check_draft(leagueid,playercache,leaguecache,teamcache,draftcache,botid)
+        except Exception:
+            logging.exception('Caught unhandled exception')
+            raise
+    logger.info('Run complete')
 
 if __name__ == '__main__':
     main()
-    sys.exit()
