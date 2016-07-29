@@ -128,12 +128,14 @@ def check_draft(leagueid, playercache, leaguecache, teamcache, draftcache, botid
     _MFL.leagueid = leagueid
     make_file_directory(playercache,leaguecache,teamcache,draftcache)
     teams = get_or_fetch(teamcache,fetch_teams,[leaguecache])
+    num_teams = len(teams)
     players = get_or_fetch(playercache,fetch_players,list())
     (full_draft,new_picks) = get_draft_info(draftcache)
     msglist = list()
-    template = "{rnd}.{pick}: {player}, {pos}, {team}"
+    template = "{rnd}.{pick}: {player}, {pos}, {team} - {opick} overall"
     for pickinfo in new_picks:
         (franchiseid, roundnum, picknum, playerid) = pickinfo.split('_')
+        opick = (int(roundnum) - 1) * num_teams + int(picknum)
         playerinfo = players[playerid]
         teaminfo = teams[franchiseid]
         msgline = template.format(
@@ -142,6 +144,7 @@ def check_draft(leagueid, playercache, leaguecache, teamcache, draftcache, botid
             player=playerinfo['name'],
             pos=playerinfo['position'],
             team=teaminfo['name'],
+            opick=opick,
             )
         msglist.append(msgline)
         logging.debug("Added '%s' to msglist",msgline)
