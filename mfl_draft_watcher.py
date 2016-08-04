@@ -68,7 +68,10 @@ def post_to_gm(msg,botid):
     data = {'bot_id': botid, 'text': msg}
     gm_url = 'https://api.groupme.com/v3/bots/post'
     result = requests.post(gm_url,data=data)
-    result.raise_for_status()
+    try:
+        result.raise_for_status()
+    except Exception:
+        logging.exception('Unable to post to GM')
     logging.debug('Result of GM post: %i',result.status_code)
 
 def old(filename):
