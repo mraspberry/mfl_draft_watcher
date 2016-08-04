@@ -135,8 +135,11 @@ def check_draft(leagueid, playercache, leaguecache, teamcache, draftcache, botid
     template = "{rnd}.{pick}: {player}, {pos}, {team} - {opick} overall"
     for pickinfo in new_picks:
         (franchiseid, roundnum, picknum, playerid) = pickinfo.split('_')
-        opick = (int(roundnum) - 1) * num_teams + int(picknum)
-        playerinfo = players[playerid]
+        opick = (int(roundnum;) - 1) * num_teams + int(picknum)
+        if playerid == '----':
+            playerinfo = dict(name='Skipped', position='N/A')
+        else:
+            playerinfo = players[playerid]
         teaminfo = teams[franchiseid]
         msgline = template.format(
             rnd=roundnum,
