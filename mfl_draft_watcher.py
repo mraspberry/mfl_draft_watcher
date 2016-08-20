@@ -141,6 +141,8 @@ def check_draft(leagueid, playercache, leaguecache, teamcache, draftcache, botid
         opick = (int(roundnum) - 1) * num_teams + int(picknum)
         if playerid == '----':
             playerinfo = dict(name='Skipped', position='N/A')
+        elif playerid == '0000':
+            playerinfo = dict(name='Timer expired', position='N/A')
         else:
             playerinfo = players[playerid]
         teaminfo = teams[franchiseid]
